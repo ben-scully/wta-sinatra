@@ -1,0 +1,11 @@
+%table.table
+  %thead
+    %tr
+      - @headers.each do |header|
+        %th= header
+
+  %tbody
+    - @rows.each do |row|
+      %tr
+        - @headers.each do |header|
+          %td= row[header]

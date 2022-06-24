@@ -1,0 +1,38 @@
+!!!
+%html(lang="en")
+  %head
+    %meta(charset="utf-8")
+    %meta(name="viewport" content="width=device-width, initial-scale=1")
+    %title xero-ruby SDK
+    %link(href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-EVSTQN3/azprG1Anm3QDgpJLIm9Nao0Yz1ztcQTwFspd3yD65VohhpuuCOmLASjC" crossorigin="anonymous")
+  %body
+    .container-fluid
+      .row
+        .col
+          %a{href: "/"} Home
+      .row
+        .col-sm-2.sidenav
+          %h4 Authentication
+          %ul.nav.flex-column
+            %li.nav-item
+              %a.nav-link{:href => "/refresh-token"} Refresh Token
+            %li.nav-item
+              %a.nav-link{:href => "/connections"} List Connections
+            %li.nav-item
+              %a.nav-link{:href => "/add-connection"} Add Connection
+            %li.nav-item
+              %a.nav-link{:href => "/disconnect"} Disconnect
+          %ul.nav.flex-column
+            %h4 Accounting API
+            %li.nav-item
+              %a.nav-link{:href => "/contacts"} Get Contacts
+            %li.nav-item
+              %a.nav-link{:href => "/invoices"} Get Invoices
+            %li.nav-item
+              %a.nav-link{:href => "/csv_sync_contacts"} Sync Contacts
+            %li.nav-item
+              %a.nav-link{:href => "/csv_sync_invoices"} Sync Invoices
+            %li.nav-item
+              %a.nav-link{:href => "/dup_detection"} Dup Detection
+        .col-10
+          = yield

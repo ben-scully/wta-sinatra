@@ -1,0 +1,17 @@
+%table.table
+  %thead
+    %tr
+      %th contact_id
+      %th name
+      %th contact_persons
+      %th email_address
+      %th updated_date_utc
+
+  %tbody
+    - @contacts.each do |contact|
+      %tr
+        %td= contact.contact_id
+        %td= contact.name
+        %td= contact.contact_persons
+        %td= contact.email_address
+        %td= contact.updated_date_utc&.strftime("%Y-%m-%d")
