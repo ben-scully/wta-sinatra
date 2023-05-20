@@ -1,3 +1,16 @@
-- @invoices.each do |invoice|
- %pre= invoice.pretty_inspect
- %hr
+%table.table
+  %thead
+    %tr
+      - @headers.each do |header|
+        - hrds = Array(header)
+        %th= hrds.join(", ")
+
+  %tbody
+    - @rows.each do |row|
+      %tr
+        - @headers.each do |header|
+          - hrds = Array(header)
+          - value = row.send(hrds[0])
+          - if hrds.length > 1
+            - value = value.send(hrds[1])
+          %td= value

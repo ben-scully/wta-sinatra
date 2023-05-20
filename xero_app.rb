@@ -150,7 +150,61 @@ end
 get '/invoices' do
   xero_client.set_token_set(session[:token_set])
   tenant_id = xero_client.connections[0]['tenantId']
-  @invoices = xero_client.accounting_api.get_invoices(tenant_id).invoices
+  @rows = xero_client.accounting_api.get_invoices(tenant_id).invoices
+  @headers = @rows.first.to_attributes.keys unless @rows.empty?
+
+  haml :invoices
+end
+
+get '/invoices-filtered' do
+  from = Date.new(2020, 4, 1)
+  to = Date.new(2021, 3, 31)
+  @rows = get_invoices_btwn_dates(xero_client, from, to)
+
+  @headers = [
+    'type',
+    ['contact', 'name'],
+    'date',
+    'due_date',
+    'invoice_number',
+    'reference',
+    'total',
+    'amount_due',
+    'amount_paid',
+    'amount_credited',
+    'credit_notes'
+  ]
+
+  haml :invoices
+end
+
+get '/credit-invoices' do
+  from = Date.new(2020, 4, 1)
+  to = Date.new(2021, 3, 31)
+  @rows = get_invoices_btwn_dates(xero_client, from, to)
+
+  @headers = [
+    'type',
+    ['contact', 'name'],
+    'date',
+    'due_date',
+    'invoice_number',
+    'reference',
+    'total',
+    'amount_due',
+    'amount_paid',
+    'amount_credited',
+    'credit_notes'
+  ]
+
+  @rows.each do |row|
+    invoice = get_invoice(xero_client, row.invoice_id)
+
+    date = Date.new(2022, 3, 31)
+
+    account_code = '491' # bad debt code
+    credit_invoice(xero_client, invoice, date, account_code)
+  end
 
   haml :invoices
 end
@@ -263,9 +317,10 @@ get '/csv_sync_invoices' do
       invoice_date = Date.parse(row['date']).strftime('%Y-%m-%d')
       invoice_due_date = Date.parse(row['due_date']).strftime('%Y-%m-%d')
 
+      # Remained of your non-refundable commitment fee.
       description = <<~HEREDOC
         #{row['player_first']} #{row['player_last']} #{row['season']} #{row['event']} #{row['team']}
-        Remained of your non-refundable commitment fee.
+        #{raise 'update this description'}
       HEREDOC
 
       line_items = [
