@@ -1,6 +1,9 @@
 - if @id_token
   %h2 Decoded ID Token
   %pre= @id_token.pretty_inspect
+- if @errors
+  %h2 Errors
+  %pre= @errors.join("\n")
 - if @access_token
   %h2 Decoded Access Token
   %pre= @access_token.pretty_inspect

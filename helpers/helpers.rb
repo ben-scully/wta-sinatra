@@ -50,6 +50,7 @@ def csv_as_hash(filename, required_headers)
 end
 
 def hash_as_csv(filename, headers, rows_as_hash)
+  puts "Starting 'hash_as_csv' for filename: #{filename}"
   rows_as_arr = rows_as_hash.map do |row|
     headers.map do |header|
       row[header]
@@ -64,4 +65,5 @@ def hash_as_csv(filename, headers, rows_as_hash)
       csv << row
     end
   end
+  puts "Completed 'hash_as_csv' for filename: #{filename}"
 end

@@ -25,14 +25,26 @@
           %ul.nav.flex-column
             %h4 Accounting API
             %li.nav-item
+              Contacts
+            %li.nav-item
               %a.nav-link{:href => "/contacts"} Get Contacts
+            %li.nav-item
+              %a.nav-link{:href => "/contacts-dup-detection"} Detect Dup Contacts
+            %li.nav-item
+              %a.nav-link{:href => "/contacts-create-missing"} Create Missing Contacts (dryrun)
+            %li.nav-item
+              %a.nav-link{:href => "/contacts-create-missing?confirmed=true"} Create Missing Contacts (actual)
+            %li.nav-item
+              Invoices
             %li.nav-item
               %a.nav-link{:href => "/invoices"} Get Invoices
             %li.nav-item
-              %a.nav-link{:href => "/csv_sync_contacts"} Sync Contacts
+              %a.nav-link{:href => "/invoices-filtered"} Get Invoices - filtered
             %li.nav-item
-              %a.nav-link{:href => "/csv_sync_invoices"} Sync Invoices
+              %a.nav-link{:href => "/invoices-create-missing"} Create Missing Invoices (dryrun)
             %li.nav-item
-              %a.nav-link{:href => "/dup_detection"} Dup Detection
+              %a.nav-link{:href => "/invoices-create-missing?confirmed=true"} Create Missing Invoices (actual)
+            %li.nav-item
+              %a.nav-link{:href => "/invoices-credit"} Credit Invoices (btwn from & to)
         .col-10
           = yield

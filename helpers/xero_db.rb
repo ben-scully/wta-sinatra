@@ -6,7 +6,7 @@ require 'byebug'
 
 def wta_csv_filename
   csv_dir = 'input'
-  year = '2021-22'
+  year = '2022-23'
   tab = 'InvoiceOverdues'
   "#{csv_dir}/#{year} WTA Player Payments - #{tab}.csv"
 end
@@ -36,6 +36,7 @@ def account_code_by(grade)
 end
 
 def get_contact_by_email(xero_client, email)
+  puts "get_contact_by_email for email: #{email}"
   xero_client.set_token_set(session[:token_set])
   tenant_id = xero_client.connections[0]['tenantId']
 
@@ -51,6 +52,11 @@ def get_contact_by_email(xero_client, email)
 end
 
 def create_contact(xero_client, first_name, last_name, email)
+  if first_name.nil? || last_name.nil? || email.nil?
+    puts "Cannot create_contact if any of first_name (#{first_name}), last_name (#{last_name}), email (#{email}) are empty"
+    return [false, "Cannot create_contact due to errors"]
+  end
+
   xero_client.set_token_set(session[:token_set])
   tenant_id = xero_client.connections[0]['tenantId']
 
@@ -62,7 +68,7 @@ def create_contact(xero_client, first_name, last_name, email)
   }
 
   new_contacts = xero_client.accounting_api.create_contacts(tenant_id, contacts).contacts
-  new_contacts[0]
+  [true, new_contacts[0]]
 end
 
 def get_invoice(xero_client, invoice_id)
