@@ -25,6 +25,10 @@ CREDENTIALS ||= {
   scopes: ENV['SCOPES']
 }.freeze
 
+DRYRUN = 'DRYRUN'.freeze
+MISSING = 'MISSING'.freeze
+ERROR = 'error'.freeze
+
 # We initialise an instance of the Xero API Client here so we can make calls
 # to the API later. Memoization `||=`` will return a previously initialized client.
 helpers do
@@ -38,41 +42,23 @@ end
 # If we don't, then redirect to the index page to prompt
 # the user to go through the OAuth 2.0 authorization flow.
 before do
-  puts <<~HEREDOC
-    ============================
-    BEFORE:
-    session[:token_set]:
-    #{session[:token_set]}
-
-  HEREDOC
-  puts
   if request.path_info == '/auth/callback'
-    puts <<~HEREDOC
-      ----------------------------
-      PASS:
-      request.path_info:
-      #{request.path_info}
-
-    HEREDOC
-    puts
     pass
   end
 
   if request.path_info != '/' && session[:token_set].nil?
-    puts <<~HEREDOC
-      ----------------------------
-      REDIRECT:
-      request.path_info:
-      #{request.path_info}
-
-      ----------------------------
-      session[:token_set]:
-      #{session[:token_set]}
-
-    HEREDOC
-    puts
     redirect to('/')
   end
+end
+
+def dryrun?(*args)
+  return false if params['confirmed'] == 'true'
+
+  @errors = [
+    "params: #{params}",
+    "*args: #{args}"
+  ]
+  true
 end
 
 # On the homepage, we need to define a few variables that are used by the
@@ -188,102 +174,76 @@ end
 get '/contacts-create-missing' do
   @headers, @rows = csv_as_hash(wta_csv_filename, wta_required_headers)
 
-  changes_detected = false
-  dryrun = true
-  dryrun = false if confirmed?
+  # determine if this is a dry run
+  dryrun = dryrun?
 
   @rows.each do |row|
-    payer_xero_contact_id = row['payer_xero_contact_id']
-    missing_email_msg = 'MISSING email'
-    dryrun_msg = 'DRYRUN: to be created'
-    error_msg = 'error'
-
-    # already a value BUT it's not dryrun_msg or missing_email_msg AND it's doesn't include error_msg
-    next if payer_xero_contact_id &&
-            payer_xero_contact_id != dryrun_msg &&
-            payer_xero_contact_id != missing_email_msg &&
-            !payer_xero_contact_id.include?(error_msg)
-
     puts
     puts
     puts "===================="
 
-    changes_detected = true
-
+    # Validate
     unless row['payer_email']
-      puts <<~HEREDOC
-        CSV: missing payer_email for player_first: #{row['player_first']}
-      HEREDOC
-      row['payer_xero_contact_id'] = missing_email_msg
+      puts "CSV: missing payer_email for player_first: #{row['player_first']}"
+      row['payer_xero_contact_id'] = 'MISSING email'
       next
     end
 
-    puts <<~HEREDOC
-      CSV: missing contact_id for #{row['payer_email']}
-    HEREDOC
+    # Skip this row if it's already been processed correctly
+    payer_xero_contact_id = row['payer_xero_contact_id']
+    next if payer_xero_contact_id &&
+            !payer_xero_contact_id.include?(DRYRUN) &&
+            !payer_xero_contact_id.include?(MISSING) &&
+            !payer_xero_contact_id.include?(ERROR)
+
+    puts "CSV: missing contact_id for #{row['payer_email']}"
 
     begin
       existing_contact = false
 
-      if row['payer_xero_contact_id'] == dryrun_msg
-        puts <<~HEREDOC
-          FYI: this 2nd time running in dryrun mode, don't ping Xero API #{row['payer_email']}
-        HEREDOC
+      if row['payer_xero_contact_id']&.include?(DRYRUN)
+        puts "FYI: this 2nd time running in DRYRUN mode, don't ping Xero API #{row['payer_email']}"
+        next
       else
         existing_contact = get_contact_by_email(xero_client, row['payer_email'])
       end
 
-      if existing_contact
-        puts <<~HEREDOC
-          API: there is a xero_contact_id for #{row['payer_email']} setting 'payer_xero_contact_id' (#{existing_contact.contact_id}) in CSV
-        HEREDOC
+      if dryrun
+        dryrun_msg = 'DRYRUN: to be created'
+        puts "FYI: this a DRYRUN for  #{row['payer_email']}. Set 'payer_xero_contact_id' to #{dryrun_msg}"
+        row['payer_xero_contact_id'] = dryrun_msg
+        next
+      end
 
+      if existing_contact
+        puts "API: existing xero_contact_id for #{row['payer_email']}. Set 'payer_xero_contact_id' (#{existing_contact.contact_id}) in CSV"
         row['payer_xero_contact_id'] = existing_contact.contact_id
         next
       end
 
-      puts <<~HEREDOC
-        API: there is NO xero_contact_id for #{row['payer_email']} creating new Xero Contact
-      HEREDOC
+      puts "API: there is NO existing xero_contact_id for #{row['payer_email']} need to create new Xero Contact"
 
-      if dryrun
-        puts <<~HEREDOC
-          FYI: this a dryrun for  #{row['payer_email']}. Set 'payer_xero_contact_id' to #{dryrun_msg}
-        HEREDOC
-        row['payer_xero_contact_id'] = dryrun_msg
+      firstname = row['payer_first']
+      lastname = row['payer_last']
+
+      if !firstname || !lastname
+        puts "CSV: missing payer names, will try to use player names. Email: #{row['payer_email']}"
+        firstname = row['player_first']
+        lastname = row['player_last']
+      end
+
+      result, new_contact, error_msg = create_contact(
+        xero_client,
+        firstname,
+        lastname,
+        row['payer_email']
+      )
+
+      if result
+        puts "new Xero Contact has been created for #{row['payer_email']}. Set 'payer_xero_contact_id' (#{new_contact.contact_id}) in CSV"
+        row['payer_xero_contact_id'] = new_contact.contact_id
       else
-        firstname = row['payer_first']
-        lastname = row['payer_last']
-
-        if !firstname || !lastname
-          puts <<~HEREDOC
-            CSV: missing payer names, will try to use player names. Email: #{row['payer_email']}
-          HEREDOC
-          firstname = row['player_first']
-          lastname = row['player_last']
-        end
-
-        result, new_contact = create_contact(
-          xero_client,
-          firstname,
-          lastname,
-          row['payer_email']
-        )
-
-        if result
-          puts <<~HEREDOC
-            new_contact class is: #{new_contact.class}
-          HEREDOC
-
-          puts <<~HEREDOC
-            a new Xero Contact has been created for #{row['payer_email']}
-            setting 'payer_xero_contact_id' (#{new_contact.contact_id}) in CSV
-          HEREDOC
-
-          row['payer_xero_contact_id'] = new_contact.contact_id
-        else
-          row['payer_xero_contact_id'] = new_contact
-        end
+        row['payer_xero_contact_id'] = error_msg
       end
     rescue XeroRuby::ApiError => e
       puts e
@@ -292,7 +252,7 @@ get '/contacts-create-missing' do
     end
   end
 
-  hash_as_csv(wta_csv_filename, @headers, @rows) if changes_detected
+  hash_as_csv(wta_csv_filename, @headers, @rows)
 
   haml :csv
 end
@@ -307,10 +267,14 @@ get '/invoices' do
   haml :invoices
 end
 
+# Use these vars in both '/invoices-filtered' & '/invoices-credit' so i don't
+# look at result of '/invoices-filtered' and think that is what will be credited in '/invoices-credit'
+invoice_filter_from = Date.new(2021, 4, 1)
+invoice_filter_to = Date.new(2022, 3, 31)
+credit_date = invoice_filter_to.next_year
+
 get '/invoices-filtered' do
-  from = Date.new(2020, 4, 1)
-  to = Date.new(2021, 3, 31)
-  @rows = get_invoices_btwn_dates(xero_client, from, to)
+  @rows = get_invoices_btwn_dates(xero_client, invoice_filter_from, invoice_filter_to)
 
   @headers = [
     'type',
@@ -329,23 +293,10 @@ get '/invoices-filtered' do
   haml :invoices
 end
 
-def confirmed?(*args)
-  return true if params['confirmed'] == 'true'
-
-  @errors = [
-    "params: #{params}",
-    "*args: #{args}"
-  ]
-  false
-end
-
 get '/invoices-credit' do
-  from = Date.new(2020, 4, 1)
-  to = Date.new(2021, 3, 31)
+  return haml :home unless dryrun?(invoice_filter_from, invoice_filter_to)
 
-  return haml :home unless confirmed?(from, to)
-
-  @rows = get_invoices_btwn_dates(xero_client, from, to)
+  @rows = get_invoices_btwn_dates(xero_client, invoice_filter_from, invoice_filter_to)
 
   @headers = [
     'type',
@@ -363,11 +314,8 @@ get '/invoices-credit' do
 
   @rows.each do |row|
     invoice = get_invoice(xero_client, row.invoice_id)
-
-    date = Date.new(2022, 3, 31)
-
     account_code = '491' # bad debt code
-    credit_invoice(xero_client, invoice, date, account_code)
+    credit_invoice(xero_client, invoice, credit_date, account_code)
   end
 
   haml :invoices
@@ -376,94 +324,109 @@ end
 get '/invoices-create-missing' do
   @headers, @rows = csv_as_hash(wta_csv_filename, wta_required_headers)
 
-  changes_detected = false
-  dryrun = true
-  dryrun = false if confirmed?
+  # determine if this is a dry run
+  dryrun = dryrun?
 
   @rows.each do |row|
-    next if row['xero_invoice_id']
-    raise "missing 'payer_xero_contact_id'" unless row['payer_xero_contact_id']
-
-    changes_detected = true
-
-    puts <<~HEREDOC
-      ============================================================
-      CSV: missing xero_invoice_id for #{row['payer_email']}  #{row['payer_xero_contact_id']}
-    HEREDOC
     puts
+    puts
+    puts "===================="
+
+    # Validate
+    unless row['payer_xero_contact_id']
+      puts "CSV: missing 'payer_xero_contact_id' for #{row['payer_email']}"
+      row['xero_invoice_id'] = 'MISSING payer_xero_contact_id'
+      next
+    end
+
+    # Skip this row if it's already been processed correctly
+    xero_invoice_id = row['xero_invoice_id']
+    next if xero_invoice_id &&
+            !xero_invoice_id.include?(DRYRUN) &&
+            !xero_invoice_id.include?(MISSING) &&
+            !xero_invoice_id.include?(ERROR)
+
+    puts "CSV: missing xero_invoice_id for #{row['payer_email']} #{row['payer_xero_contact_id']}"
 
     begin
-      team = row['team']
-      reference = "#{row['season']} #{row['event']} #{team} #{row['player_first']} #{row['player_last']}"
-      existing_invoices = get_invoices_by(xero_client, row['payer_xero_contact_id'], reference)
+      existing_invoices = []
+
+      if dryrun && row['xero_invoice_id']&.include?(DRYRUN)
+        puts "FYI: this 2nd time running in DRYRUN mode, don't ping Xero API #{row['payer_email']}"
+        next
+      else
+        team = row['team']
+        reference = "#{row['season']} #{row['event']} #{team} #{row['player_first']} #{row['player_last']}"
+        existing_invoices = get_invoices_by(xero_client, row['payer_xero_contact_id'], reference)
+      end
+
+      if dryrun
+        dryrun_msg = 'DRYRUN: to be created'
+        puts "FYI: this a DRYRUN for  #{row['payer_email']}. Set 'xero_invoice_id' to #{dryrun_msg}"
+        row['xero_invoice_id'] = dryrun_msg
+        next
+      end
 
       if existing_invoices.length > 1
-        row['xero_invoice_id'] = 'More than 1 invoice detected. Review before continuing'
+        error_msg = 'error: More than 1 invoice detected. Review before continuing'
+        puts "ERROR: for #{row['payer_email']}. Set 'xero_invoice_id' to #{error_msg}"
+        row['xero_invoice_id'] = 'error: More than 1 invoice detected. Review before continuing'
         next
       end
 
       if existing_invoices.length == 1
-        puts <<~HEREDOC
-          API: there is a xero_invoice_id for #{row['amount']} #{[row['season'], row['event'], team].join(', ')}
-          setting 'xero_invoice_id' (#{existing_invoices[0].invoice_id}) in CSV
-        HEREDOC
-        puts
-
+        puts "API: existing xero_invoice_id for #{row['amount']} #{reference}. Set 'xero_invoice_id' (#{existing_invoices[0].invoice_id}) in CSV"
         row['xero_invoice_id'] = existing_invoices[0].invoice_id
         next
       end
 
-      puts <<~HEREDOC
-        API: there is NO xero_invoice_id for #{row['payer_email']} creating new Xero Invoice
-      HEREDOC
-      puts
+      puts "API: there is NO xero_invoice_id for #{row['payer_email']} creating new Xero Invoice"
 
       invoice_date = Date.parse(row['date']).strftime('%Y-%m-%d')
       invoice_due_date = Date.parse(row['due_date']).strftime('%Y-%m-%d')
 
-      # Remained of your non-refundable commitment fee.
       team = row['team']
       description = <<~HEREDOC
         #{row['player_first']} #{row['player_last']} #{row['season']} #{row['event']} #{team}
-        #{raise 'update this description'}
+        #{row['description']}
       HEREDOC
+
+      account_code = account_code_by(team)
+
+      if account_code.include?(ERROR)
+        puts "ERROR: #{account_code}"
+        row['xero_invoice_id'] = account_code
+        next
+      end
 
       line_items = [
         {
           description: description,
           quantity: 1.0,
           unit_amount: row['amount'].to_f,
-          account_code: account_code_by(team)
+          account_code: account_code
         }
       ]
 
-      if dryrun
-        row['xero_invoice_id'] = 'DRYRUN: to be created'
-      else
-        new_invoice = create_invoice(
-          xero_client,
-          row['payer_xero_contact_id'],
-          invoice_date,
-          invoice_due_date,
-          reference,
-          line_items
-        )
+      new_invoice = create_invoice(
+        xero_client,
+        row['payer_xero_contact_id'],
+        invoice_date,
+        invoice_due_date,
+        reference,
+        line_items
+      )
 
-        puts <<~HEREDOC
-          API: a new Xero Invoice has been created for #{row['payer_email']}
-          setting 'xero_invoice_id' (#{new_invoice.invoice_id}) in CSV
-        HEREDOC
-        puts
-
-        row['xero_invoice_id'] = new_invoice.invoice_id
-      end
+      puts "API: new Xero Invoice has been created for #{row['payer_email']}. Set 'xero_invoice_id' (#{new_invoice.invoice_id}) in CSV"
+      row['xero_invoice_id'] = new_invoice.invoice_id
     rescue XeroRuby::ApiError => e
+      puts e
       row['xero_invoice_id'] = e.message
       next
     end
   end
 
-  hash_as_csv(wta_csv_filename, @headers, @rows) if changes_detected
+  hash_as_csv(wta_csv_filename, @headers, @rows)
 
   haml :csv
 end

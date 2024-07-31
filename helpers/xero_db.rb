@@ -27,10 +27,10 @@ def account_code_by(grade)
   hsh = {
     '216': ['juniors'],
     '244': %w[youths u16b u16g u16x u18b u18g u18x],
-    '204': %w[seniors om ow ox 40m openmens openwomens openmixed]
+    '204': %w[seniors om ow ox 40m 40mens openmens openwomens openmixed]
   }
   acnt_code = hsh.select { |_k, v| v.include?(grade) }.keys[0]
-  raise "Grade doesn't match any account code. Grade: #{grade}" unless acnt_code
+  return "error: Grade doesn't match any account code. Grade: #{grade}" unless acnt_code
 
   acnt_code.to_s
 end
@@ -54,7 +54,7 @@ end
 def create_contact(xero_client, first_name, last_name, email)
   if first_name.nil? || last_name.nil? || email.nil?
     puts "Cannot create_contact if any of first_name (#{first_name}), last_name (#{last_name}), email (#{email}) are empty"
-    return [false, "Cannot create_contact due to errors"]
+    return [false, nil, 'Cannot create_contact due to errors']
   end
 
   xero_client.set_token_set(session[:token_set])
@@ -81,6 +81,8 @@ def get_invoice(xero_client, invoice_id)
 end
 
 def get_invoices_by(xero_client, xero_contact_id, reference)
+  puts "get_invoices_by for reference: #{reference}"
+
   xero_client.set_token_set(session[:token_set])
   tenant_id = xero_client.connections[0]['tenantId']
 
@@ -184,6 +186,7 @@ def credit_invoice(xero_client, invoice, date, account_code)
   }
 
   credit_note = xero_client.accounting_api.create_credit_notes(tenant_id, credits, opts).credit_notes[0]
+  # puts credit_note
 
   allocation = { amount: invoice.amount_due, invoice: { invoice_id: invoice.invoice_id } }
   allocations = { allocations: [allocation] }
