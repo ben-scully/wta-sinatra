@@ -80,9 +80,8 @@ def get_invoice(xero_client, invoice_id)
   xero_client.accounting_api.get_invoice(tenant_id, invoice_id, opts).invoices[0]
 end
 
+# TODO: migrate to `xero_service.rb` when `get '/invoices-create-missing'` is updated
 def get_invoices_by(xero_client, xero_contact_id, reference)
-  puts "get_invoices_by for reference: #{reference}"
-
   xero_client.set_token_set(session[:token_set])
   tenant_id = xero_client.connections[0]['tenantId']
 
@@ -91,21 +90,6 @@ def get_invoices_by(xero_client, xero_contact_id, reference)
       'Contact.ContactID': ['=', xero_contact_id],
       reference: ['=', reference],
       status: ['!=', 'DELETED']
-    }
-  }
-
-  xero_client.accounting_api.get_invoices(tenant_id, opts).invoices
-end
-
-def get_invoices_btwn_dates(xero_client, from, to = DateTime.now)
-  xero_client.set_token_set(session[:token_set])
-  tenant_id = xero_client.connections[0]['tenantId']
-
-  opts = {
-    where: {
-      date: from..to,
-      type: ['=', 'ACCREC'],
-      status: ['=', 'AUTHORISED']
     }
   }
 
@@ -141,55 +125,4 @@ def create_invoice(xero_client, xero_contact_id, date, due_date, reference, line
   end
 
   new_invoices.invoices[0]
-end
-
-def get_contacts_with_email(xero_client)
-  xero_client.set_token_set(session[:token_set])
-  tenant_id = xero_client.connections[0]['tenantId']
-  opts = {
-    summaryOnly: true,
-    where: {
-      email_address: ['!=', nil]
-    }
-  }
-  xero_client.accounting_api.get_contacts(tenant_id, opts).contacts
-end
-
-def credit_invoice(xero_client, invoice, date, account_code)
-  xero_client.set_token_set(session[:token_set])
-  tenant_id = xero_client.connections[0]['tenantId']
-
-  line_items = [
-    {
-      description: invoice.line_items[0].description,
-      quantity: invoice.line_items[0].quantity,
-      unit_amount: invoice.amount_due,
-      account_code: account_code # normally '491' bad debt code
-    }
-  ]
-
-  credit = {
-    type: XeroRuby::Accounting::CreditNote::ACCRECCREDIT,
-    status: XeroRuby::Accounting::CreditNote::AUTHORISED,
-    contact: { contact_id: invoice.contact.contact_id },
-    date: date,
-    reference: invoice.reference,
-    line_amount_types: XeroRuby::Accounting::LineAmountTypes::INCLUSIVE,
-    line_items: line_items
-  }
-
-  credits = { credit_notes: [credit] }
-
-  opts = {
-    summarize_errors: true,
-    unitdp: 2
-  }
-
-  credit_note = xero_client.accounting_api.create_credit_notes(tenant_id, credits, opts).credit_notes[0]
-  # puts credit_note
-
-  allocation = { amount: invoice.amount_due, invoice: { invoice_id: invoice.invoice_id } }
-  allocations = { allocations: [allocation] }
-
-  xero_client.accounting_api.create_credit_note_allocation(tenant_id, credit_note.credit_note_id, allocations, opts)
 end

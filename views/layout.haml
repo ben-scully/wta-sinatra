@@ -39,12 +39,14 @@
             %li.nav-item
               %a.nav-link{:href => "/invoices"} Get Invoices
             %li.nav-item
-              %a.nav-link{:href => "/invoices-filtered"} Get Invoices - filtered
+              %a.nav-link{:href => "/invoices-filtered"} Get Invoices - Filtered
             %li.nav-item
               %a.nav-link{:href => "/invoices-create-missing"} Create Missing Invoices (dryrun)
             %li.nav-item
               %a.nav-link{:href => "/invoices-create-missing?confirmed=true"} Create Missing Invoices (actual)
             %li.nav-item
-              %a.nav-link{:href => "/invoices-credit"} Credit Invoices (btwn from & to)
+              %a.nav-link{:href => "/invoices-credit-filtered"} Credit Invoices - Filtered (dryrun)
+            %li.nav-item
+              %a.nav-link{:href => "/invoices-credit-filtered?confirmed=true"} Credit Invoices - Filtered (actual)
         .col-10
           = yield

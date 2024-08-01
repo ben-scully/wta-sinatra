@@ -11,6 +11,7 @@ require 'pp'
 require 'byebug' if development?
 require_relative 'helpers/helpers'
 require_relative 'helpers/xero_db'
+require_relative 'xero_service'
 
 enable :sessions
 set :session_secret, '328479283uf923fu8932fu923uf9832f23f232'
@@ -35,12 +36,14 @@ helpers do
   def xero_client
     @xero_client ||= XeroRuby::ApiClient.new(credentials: CREDENTIALS)
   end
+
+  def xero_service
+    @xero_service ||= XeroService.new(xero_client)
+  end
 end
 
-# Before every request, we need to check that we have
-# a session.
-# If we don't, then redirect to the index page to prompt
-# the user to go through the OAuth 2.0 authorization flow.
+# Before every request, we need to check that we have a session.
+# If we don't, then redirect to the index page to prompt the user to go through the OAuth 2.0 authorization flow.
 before do
   if request.path_info == '/auth/callback'
     pass
@@ -61,8 +64,7 @@ def dryrun?(*args)
   true
 end
 
-# On the homepage, we need to define a few variables that are used by the
-# 'home.haml' layout file in the 'views/' directory.
+# On the homepage, we need to define a few variables that are used by the 'home.haml' layout file in the 'views/' directory.
 get '/' do
   @token_set = session[:token_set]
   @auth_url = xero_client.authorization_url
@@ -73,24 +75,21 @@ get '/' do
   haml :home
 end
 
-# This endpoint is used to handle the redirect from the
-# Xero OAuth 2.0 authorisation process
+# This endpoint is used to handle the redirect from the Xero OAuth 2.0 authorisation process
 get '/auth/callback' do
   @token_set = xero_client.get_token_set_from_callback(params)
   session[:token_set] = @token_set
   redirect to('/')
 end
 
-# This endpoint redirects the user to connect another
-# Xero organisation.
+# This endpoint redirects the user to connect another Xero organisation.
 get '/add-connection' do
   @auth_url = xero_client.authorization_url
   redirect to(@auth_url)
 end
 
 # This endpoint is here specifically to refresh the token at will.
-# In a production setting this will most likely happen as part of a background job,
-# not something the user has to click.
+# In a production setting this will most likely happen as part of a background job, not something the user has to click.
 get '/refresh-token' do
   @token_set = xero_client.refresh_token_set(session[:token_set])
   session[:token_set] = @token_set
@@ -102,13 +101,11 @@ get '/refresh-token' do
   haml :refresh_token
 end
 
-# This endpoint allows the user to explicitly disconnect the app from
-# their Xero organisation.
-# Note: At this point in time, it assumes that you have a single organisation
-# connected.
+# This endpoint allows the user to explicitly disconnect the app from their Xero organisation.
+# Note: At this point in time, it assumes that you have a single organisation connected.
+# This will disconnect the first organisation that appears in the xero_client.connections array.
 get '/disconnect' do
   xero_client.set_token_set(session[:token_set])
-  # This will disconnect the first organisation that appears in the xero_client.connections array.
   xero_client.disconnect(xero_client.connections[0]['id'])
   @connections = xero_client.connections
 
@@ -126,307 +123,257 @@ end
 # This endpoint shows contacts data via the 'contacts.haml' view.
 get '/contacts' do
   xero_client.set_token_set(session[:token_set])
-  tenant_id = xero_client.connections[0]['tenantId']
-  opts = { summaryOnly: true }
-  @contacts = xero_client.accounting_api.get_contacts(tenant_id, opts).contacts
+  @contacts = xero_service.contacts
 
   haml :contacts
 end
 
 get '/contacts-dup-detection' do
-  contacts_with_email = get_contacts_with_email(xero_client)
-
-  grouped_by_email = contacts_with_email.group_by(&:email_address)
-  # {
-  #   "1@email.com": [Contact1,Contact2,Contact3],
-  #   "2@email.com": [Contact1,Contact2],
-  #   "3@email.com": [Contact1,Contact2,Contact3,Contact4]
-  # }
-
-  # reduce to contacts with 2+ of same email
-  duped_emails = grouped_by_email.select { |_k, v| v.count > 1 }
-
-  @headers = %w[
-    email_address
-    contact_id
-    contact_status
-    name
-    first_name
-    last_name
-    updated_date_utc
-  ]
-
-  # convert data from Ruby objects to Ruby hashes, the format requried for 'haml :csv'
-  hashed_contacts = duped_emails.map do |_email, contacts|
-    contacts.map do |contact|
-      @headers.each_with_object({}) do |header, hsh|
-        hsh[header] = contact.instance_variable_get("@#{header}")
-        hsh
-      end
-    end
-  end
-
-  @rows = hashed_contacts.flatten
+  xero_client.set_token_set(session[:token_set])
+  @headers, @rows = xero_service.contacts_with_duplicates
 
   haml :csv
 end
 
-get '/contacts-create-missing' do
-  @headers, @rows = csv_as_hash(wta_csv_filename, wta_required_headers)
-
-  # determine if this is a dry run
-  dryrun = dryrun?
-
-  @rows.each do |row|
-    puts
-    puts
-    puts "===================="
-
-    # Validate
-    unless row['payer_email']
-      puts "CSV: missing payer_email for player_first: #{row['player_first']}"
-      row['payer_xero_contact_id'] = 'MISSING email'
-      next
-    end
-
-    # Skip this row if it's already been processed correctly
-    payer_xero_contact_id = row['payer_xero_contact_id']
-    next if payer_xero_contact_id &&
-            !payer_xero_contact_id.include?(DRYRUN) &&
-            !payer_xero_contact_id.include?(MISSING) &&
-            !payer_xero_contact_id.include?(ERROR)
-
-    puts "CSV: missing contact_id for #{row['payer_email']}"
-
-    begin
-      existing_contact = false
-
-      if row['payer_xero_contact_id']&.include?(DRYRUN)
-        puts "FYI: this 2nd time running in DRYRUN mode, don't ping Xero API #{row['payer_email']}"
-        next
-      else
-        existing_contact = get_contact_by_email(xero_client, row['payer_email'])
-      end
-
-      if dryrun
-        dryrun_msg = 'DRYRUN: to be created'
-        puts "FYI: this a DRYRUN for  #{row['payer_email']}. Set 'payer_xero_contact_id' to #{dryrun_msg}"
-        row['payer_xero_contact_id'] = dryrun_msg
-        next
-      end
-
-      if existing_contact
-        puts "API: existing xero_contact_id for #{row['payer_email']}. Set 'payer_xero_contact_id' (#{existing_contact.contact_id}) in CSV"
-        row['payer_xero_contact_id'] = existing_contact.contact_id
-        next
-      end
-
-      puts "API: there is NO existing xero_contact_id for #{row['payer_email']} need to create new Xero Contact"
-
-      firstname = row['payer_first']
-      lastname = row['payer_last']
-
-      if !firstname || !lastname
-        puts "CSV: missing payer names, will try to use player names. Email: #{row['payer_email']}"
-        firstname = row['player_first']
-        lastname = row['player_last']
-      end
-
-      result, new_contact, error_msg = create_contact(
-        xero_client,
-        firstname,
-        lastname,
-        row['payer_email']
-      )
-
-      if result
-        puts "new Xero Contact has been created for #{row['payer_email']}. Set 'payer_xero_contact_id' (#{new_contact.contact_id}) in CSV"
-        row['payer_xero_contact_id'] = new_contact.contact_id
-      else
-        row['payer_xero_contact_id'] = error_msg
-      end
-    rescue XeroRuby::ApiError => e
-      puts e
-      row['payer_xero_contact_id'] = e.message
-      next
-    end
-  end
-
-  hash_as_csv(wta_csv_filename, @headers, @rows)
-
-  haml :csv
-end
-
-# This endpoint shows invoice data via the 'invoices.haml' view.
 get '/invoices' do
   xero_client.set_token_set(session[:token_set])
-  tenant_id = xero_client.connections[0]['tenantId']
-  @rows = xero_client.accounting_api.get_invoices(tenant_id).invoices
-  @headers = @rows.first.to_attributes.keys unless @rows.empty?
+  @headers, @rows = xero_service.invoices
 
   haml :invoices
 end
 
-# Use these vars in both '/invoices-filtered' & '/invoices-credit' so i don't
-# look at result of '/invoices-filtered' and think that is what will be credited in '/invoices-credit'
+# Use these vars in both '/invoices-filtered' & '/invoices-credit-filtered' so i don't
+# look at result of '/invoices-filtered' and think that is what will be credited in '/invoices-credit-filtered'
 invoice_filter_from = Date.new(2021, 4, 1)
-invoice_filter_to = Date.new(2022, 3, 31)
+invoice_filter_to = Date.new(2023, 3, 31)
 credit_date = invoice_filter_to.next_year
 
 get '/invoices-filtered' do
-  @rows = get_invoices_btwn_dates(xero_client, invoice_filter_from, invoice_filter_to)
-
-  @headers = [
-    'type',
-    ['contact', 'name'],
-    'date',
-    'due_date',
-    'invoice_number',
-    'reference',
-    'total',
-    'amount_due',
-    'amount_paid',
-    'amount_credited',
-    'credit_notes'
-  ]
+  xero_client.set_token_set(session[:token_set])
+  @headers, @rows = xero_service.invoices_btwn_dates(invoice_filter_from, invoice_filter_to)
 
   haml :invoices
 end
 
-get '/invoices-credit' do
-  return haml :home unless dryrun?(invoice_filter_from, invoice_filter_to)
+get '/invoices-credit-filtered' do
+  xero_client.set_token_set(session[:token_set])
+  @headers, @rows = xero_service.invoices_btwn_dates(invoice_filter_from, invoice_filter_to)
 
-  @rows = get_invoices_btwn_dates(xero_client, invoice_filter_from, invoice_filter_to)
+  return haml :invoices if dryrun?(invoice_filter_from, invoice_filter_to)
 
-  @headers = [
-    'type',
-    ['contact', 'name'],
-    'date',
-    'due_date',
-    'invoice_number',
-    'reference',
-    'total',
-    'amount_due',
-    'amount_paid',
-    'amount_credited',
-    'credit_notes'
-  ]
-
-  @rows.each do |row|
-    invoice = get_invoice(xero_client, row.invoice_id)
-    account_code = '491' # bad debt code
-    credit_invoice(xero_client, invoice, credit_date, account_code)
-  end
+  # TODO: ATM even if the credits work, we need to update `@headers, @rows` otherwiese
+  # it will just look as if there no credit happened.
+  invoice_ids = @rows.map(&:invoice_id)
+  xero_service.credit_invoices(invoice_ids, credit_date)
 
   haml :invoices
 end
 
+##########################################
+# Need to review & test this method
+##########################################
 get '/invoices-create-missing' do
-  @headers, @rows = csv_as_hash(wta_csv_filename, wta_required_headers)
+  raise Exception("Need to review & test this method still works")
 
-  # determine if this is a dry run
-  dryrun = dryrun?
+  # xero_client.set_token_set(session[:token_set])
+  # @headers, @rows = csv_as_hash(wta_csv_filename, wta_required_headers)
 
-  @rows.each do |row|
-    puts
-    puts
-    puts "===================="
+  # # determine if this is a dry run
+  # dryrun = dryrun?
 
-    # Validate
-    unless row['payer_xero_contact_id']
-      puts "CSV: missing 'payer_xero_contact_id' for #{row['payer_email']}"
-      row['xero_invoice_id'] = 'MISSING payer_xero_contact_id'
-      next
-    end
+  # @rows.each do |row|
+  #   puts
+  #   puts
+  #   puts "===================="
 
-    # Skip this row if it's already been processed correctly
-    xero_invoice_id = row['xero_invoice_id']
-    next if xero_invoice_id &&
-            !xero_invoice_id.include?(DRYRUN) &&
-            !xero_invoice_id.include?(MISSING) &&
-            !xero_invoice_id.include?(ERROR)
+  #   # Validate
+  #   unless row['payer_xero_contact_id']
+  #     puts "CSV: missing 'payer_xero_contact_id' for #{row['payer_email']}"
+  #     row['xero_invoice_id'] = 'MISSING payer_xero_contact_id'
+  #     next
+  #   end
 
-    puts "CSV: missing xero_invoice_id for #{row['payer_email']} #{row['payer_xero_contact_id']}"
+  #   # Skip this row if it's already been processed correctly
+  #   xero_invoice_id = row['xero_invoice_id']
+  #   next if xero_invoice_id &&
+  #           !xero_invoice_id.include?(DRYRUN) &&
+  #           !xero_invoice_id.include?(MISSING) &&
+  #           !xero_invoice_id.include?(ERROR)
 
-    begin
-      existing_invoices = []
+  #   puts "CSV: missing xero_invoice_id for #{row['payer_email']} #{row['payer_xero_contact_id']}"
 
-      if dryrun && row['xero_invoice_id']&.include?(DRYRUN)
-        puts "FYI: this 2nd time running in DRYRUN mode, don't ping Xero API #{row['payer_email']}"
-        next
-      else
-        team = row['team']
-        reference = "#{row['season']} #{row['event']} #{team} #{row['player_first']} #{row['player_last']}"
-        existing_invoices = get_invoices_by(xero_client, row['payer_xero_contact_id'], reference)
-      end
+  #   begin
+  #     existing_invoices = []
 
-      if dryrun
-        dryrun_msg = 'DRYRUN: to be created'
-        puts "FYI: this a DRYRUN for  #{row['payer_email']}. Set 'xero_invoice_id' to #{dryrun_msg}"
-        row['xero_invoice_id'] = dryrun_msg
-        next
-      end
+  #     if dryrun && row['xero_invoice_id']&.include?(DRYRUN)
+  #       puts "FYI: this 2nd time running in DRYRUN mode, don't ping Xero API #{row['payer_email']}"
+  #       next
+  #     else
+  #       team = row['team']
+  #       reference = "#{row['season']} #{row['event']} #{team} #{row['player_first']} #{row['player_last']}"
+  #       existing_invoices = get_invoices_by(xero_client, row['payer_xero_contact_id'], reference)
+  #     end
 
-      if existing_invoices.length > 1
-        error_msg = 'error: More than 1 invoice detected. Review before continuing'
-        puts "ERROR: for #{row['payer_email']}. Set 'xero_invoice_id' to #{error_msg}"
-        row['xero_invoice_id'] = 'error: More than 1 invoice detected. Review before continuing'
-        next
-      end
+  #     if dryrun
+  #       dryrun_msg = 'DRYRUN: to be created'
+  #       puts "FYI: this a DRYRUN for  #{row['payer_email']}. Set 'xero_invoice_id' to #{dryrun_msg}"
+  #       row['xero_invoice_id'] = dryrun_msg
+  #       next
+  #     end
 
-      if existing_invoices.length == 1
-        puts "API: existing xero_invoice_id for #{row['amount']} #{reference}. Set 'xero_invoice_id' (#{existing_invoices[0].invoice_id}) in CSV"
-        row['xero_invoice_id'] = existing_invoices[0].invoice_id
-        next
-      end
+  #     if existing_invoices.length > 1
+  #       error_msg = 'error: More than 1 invoice detected. Review before continuing'
+  #       puts "ERROR: for #{row['payer_email']}. Set 'xero_invoice_id' to #{error_msg}"
+  #       row['xero_invoice_id'] = 'error: More than 1 invoice detected. Review before continuing'
+  #       next
+  #     end
 
-      puts "API: there is NO xero_invoice_id for #{row['payer_email']} creating new Xero Invoice"
+  #     if existing_invoices.length == 1
+  #       puts "API: existing xero_invoice_id for #{row['amount']} #{reference}. Set 'xero_invoice_id' (#{existing_invoices[0].invoice_id}) in CSV"
+  #       row['xero_invoice_id'] = existing_invoices[0].invoice_id
+  #       next
+  #     end
 
-      invoice_date = Date.parse(row['date']).strftime('%Y-%m-%d')
-      invoice_due_date = Date.parse(row['due_date']).strftime('%Y-%m-%d')
+  #     puts "API: there is NO xero_invoice_id for #{row['payer_email']} creating new Xero Invoice"
 
-      team = row['team']
-      description = <<~HEREDOC
-        #{row['player_first']} #{row['player_last']} #{row['season']} #{row['event']} #{team}
-        #{row['description']}
-      HEREDOC
+  #     invoice_date = Date.parse(row['date']).strftime('%Y-%m-%d')
+  #     invoice_due_date = Date.parse(row['due_date']).strftime('%Y-%m-%d')
 
-      account_code = account_code_by(team)
+  #     team = row['team']
+  #     description = <<~HEREDOC
+  #       #{row['player_first']} #{row['player_last']} #{row['season']} #{row['event']} #{team}
+  #       #{row['description']}
+  #     HEREDOC
 
-      if account_code.include?(ERROR)
-        puts "ERROR: #{account_code}"
-        row['xero_invoice_id'] = account_code
-        next
-      end
+  #     account_code = account_code_by(team)
 
-      line_items = [
-        {
-          description: description,
-          quantity: 1.0,
-          unit_amount: row['amount'].to_f,
-          account_code: account_code
-        }
-      ]
+  #     if account_code.include?(ERROR)
+  #       puts "ERROR: #{account_code}"
+  #       row['xero_invoice_id'] = account_code
+  #       next
+  #     end
 
-      new_invoice = create_invoice(
-        xero_client,
-        row['payer_xero_contact_id'],
-        invoice_date,
-        invoice_due_date,
-        reference,
-        line_items
-      )
+  #     line_items = [
+  #       {
+  #         description: description,
+  #         quantity: 1.0,
+  #         unit_amount: row['amount'].to_f,
+  #         account_code: account_code
+  #       }
+  #     ]
 
-      puts "API: new Xero Invoice has been created for #{row['payer_email']}. Set 'xero_invoice_id' (#{new_invoice.invoice_id}) in CSV"
-      row['xero_invoice_id'] = new_invoice.invoice_id
-    rescue XeroRuby::ApiError => e
-      puts e
-      row['xero_invoice_id'] = e.message
-      next
-    end
-  end
+  #     new_invoice = create_invoice(
+  #       xero_client,
+  #       row['payer_xero_contact_id'],
+  #       invoice_date,
+  #       invoice_due_date,
+  #       reference,
+  #       line_items
+  #     )
 
-  hash_as_csv(wta_csv_filename, @headers, @rows)
+  #     puts "API: new Xero Invoice has been created for #{row['payer_email']}. Set 'xero_invoice_id' (#{new_invoice.invoice_id}) in CSV"
+  #     row['xero_invoice_id'] = new_invoice.invoice_id
+  #   rescue XeroRuby::ApiError => e
+  #     puts e
+  #     row['xero_invoice_id'] = e.message
+  #     next
+  #   end
+  # end
 
-  haml :csv
+  # hash_as_csv(wta_csv_filename, @headers, @rows)
+
+  # haml :csv
+end
+
+
+##########################################
+# Need to review & test this method
+##########################################
+get '/contacts-create-missing' do
+  raise Exception("Need to review & test this method still works")
+
+  # xero_client.set_token_set(session[:token_set])
+  # @headers, @rows = csv_as_hash(wta_csv_filename, wta_required_headers)
+
+  # # determine if this is a dry run
+  # dryrun = dryrun?
+
+  # @rows.each do |row|
+  #   puts
+  #   puts
+  #   puts "===================="
+
+  #   # Validate
+  #   unless row['payer_email']
+  #     puts "CSV: missing payer_email for player_first: #{row['player_first']}"
+  #     row['payer_xero_contact_id'] = 'MISSING email'
+  #     next
+  #   end
+
+  #   # Skip this row if it's already been processed correctly
+  #   payer_xero_contact_id = row['payer_xero_contact_id']
+  #   next if payer_xero_contact_id &&
+  #           !payer_xero_contact_id.include?(DRYRUN) &&
+  #           !payer_xero_contact_id.include?(MISSING) &&
+  #           !payer_xero_contact_id.include?(ERROR)
+
+  #   puts "CSV: missing contact_id for #{row['payer_email']}"
+
+  #   begin
+  #     existing_contact = false
+
+  #     if row['payer_xero_contact_id']&.include?(DRYRUN)
+  #       puts "FYI: this 2nd time running in DRYRUN mode, don't ping Xero API #{row['payer_email']}"
+  #       next
+  #     else
+  #       existing_contact = get_contact_by_email(xero_client, row['payer_email'])
+  #     end
+
+  #     if dryrun
+  #       dryrun_msg = 'DRYRUN: to be created'
+  #       puts "FYI: this a DRYRUN for  #{row['payer_email']}. Set 'payer_xero_contact_id' to #{dryrun_msg}"
+  #       row['payer_xero_contact_id'] = dryrun_msg
+  #       next
+  #     end
+
+  #     if existing_contact
+  #       puts "API: existing xero_contact_id for #{row['payer_email']}. Set 'payer_xero_contact_id' (#{existing_contact.contact_id}) in CSV"
+  #       row['payer_xero_contact_id'] = existing_contact.contact_id
+  #       next
+  #     end
+
+  #     puts "API: there is NO existing xero_contact_id for #{row['payer_email']} need to create new Xero Contact"
+
+  #     firstname = row['payer_first']
+  #     lastname = row['payer_last']
+
+  #     if !firstname || !lastname
+  #       puts "CSV: missing payer names, will try to use player names. Email: #{row['payer_email']}"
+  #       firstname = row['player_first']
+  #       lastname = row['player_last']
+  #     end
+
+  #     result, new_contact, error_msg = create_contact(
+  #       xero_client,
+  #       firstname,
+  #       lastname,
+  #       row['payer_email']
+  #     )
+
+  #     if result
+  #       puts "new Xero Contact has been created for #{row['payer_email']}. Set 'payer_xero_contact_id' (#{new_contact.contact_id}) in CSV"
+  #       row['payer_xero_contact_id'] = new_contact.contact_id
+  #     else
+  #       row['payer_xero_contact_id'] = error_msg
+  #     end
+  #   rescue XeroRuby::ApiError => e
+  #     puts e
+  #     row['payer_xero_contact_id'] = e.message
+  #     next
+  #   end
+  # end
+
+  # hash_as_csv(wta_csv_filename, @headers, @rows)
+
+  # haml :csv
 end
